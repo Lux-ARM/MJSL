@@ -68,6 +68,11 @@ const SLAB_BUCKETS = 32;
  * Pre-indexed ring representation using flat Float64Arrays and adaptive horizontal
  * Y-slab buckets for complex rings (>= 24 vertices). Reduces ray-casting cost on
  * large coastal/Calanques polygons by >50x while preserving exact geometric results.
+ *
+ * Each edge is stored as five numbers: xi, yi, yj, xj - xi, yj - yi. Keeping the
+ * deltas and doing the division at query time is deliberate: it reproduces the
+ * original ray-casting arithmetic bit for bit, including on points that sit exactly
+ * on an edge (a precomputed slope can flip the last bit there).
  */
 interface PreparedRing {
   minX: number;
@@ -101,7 +106,7 @@ function prepareRing(ring: LngLat[]): PreparedRing {
       const [xi, yi] = ring[i]!;
       const [xj, yj] = ring[j]!;
       if (yi === yj) continue;
-      arr.push(xi, yi, yj, (xj - xi) / (yj - yi));
+      arr.push(xi, yi, yj, xj - xi, yj - yi);
     }
     return { minX, minY, maxX, maxY, invDy: 0, buckets: [new Float64Array(arr)] };
   }
@@ -117,9 +122,10 @@ function prepareRing(ring: LngLat[]): PreparedRing {
     let b1 = Math.floor((yMaxEdge - minY) * invDy);
     if (b0 < 0) b0 = 0;
     if (b1 >= numBuckets) b1 = numBuckets - 1;
-    const slope = (xj - xi) / (yj - yi);
+    const dx = xj - xi;
+    const edgeDy = yj - yi;
     for (let b = b0; b <= b1; b += 1) {
-      temp[b]!.push(xi, yi, yj, slope);
+      temp[b]!.push(xi, yi, yj, dx, edgeDy);
     }
   }
   return {
@@ -135,7 +141,7 @@ function prepareRing(ring: LngLat[]): PreparedRing {
 /** Even-odd ray-casting test on a prepared ring. */
 function insidePreparedRing(point: LngLat, r: PreparedRing): boolean {
   const [x, y] = point;
-  if (x < r.minX || x > r.minX && x > r.maxX || y < r.minY || y > r.maxY) return false;
+  if (x < r.minX || x > r.maxX || y < r.minY || y > r.maxY) return false;
   let b = 0;
   if (r.invDy > 0) {
     b = Math.floor((y - r.minY) * r.invDy);
@@ -144,12 +150,13 @@ function insidePreparedRing(point: LngLat, r: PreparedRing): boolean {
   }
   const edges = r.buckets[b]!;
   let inside = false;
-  for (let k = 0; k < edges.length; k += 4) {
+  for (let k = 0; k < edges.length; k += 5) {
     const xi = edges[k]!;
     const yi = edges[k + 1]!;
     const yj = edges[k + 2]!;
-    const slope = edges[k + 3]!;
-    if (yi > y !== yj > y && x < (y - yi) * slope + xi) inside = !inside;
+    const dx = edges[k + 3]!;
+    const edgeDy = edges[k + 4]!;
+    if (yi > y !== yj > y && x < (dx * (y - yi)) / edgeDy + xi) inside = !inside;
   }
   return inside;
 }

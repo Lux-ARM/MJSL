@@ -105,11 +105,13 @@ interface BuildInput {
   zoneIndex?: PolygonIndex;
 }
 
-const reportZoneCache = new WeakMap<PolygonIndex, WeakMap<Report, string>>();
-
 /**
  * Applies citizen reports to already-built zones without re-running the expensive
  * OpenStreetMap, noise map and AMP spatial joins.
+ *
+ * Only the zone index is cached, never the report -> zone answer: keying that on the
+ * report object would go stale if a report ever moved (same object, new coordinates).
+ * Recomputing the lookup is cheap, and the index is reused.
  */
 export function withReports(
   zones: Zone[],
@@ -119,20 +121,11 @@ export function withReports(
   existingIndex?: PolygonIndex,
 ): Zone[] {
   const index = existingIndex ?? new PolygonIndex(zoneCollection);
-  let byReport = reportZoneCache.get(index);
-  if (!byReport) {
-    byReport = new WeakMap<Report, string>();
-    reportZoneCache.set(index, byReport);
-  }
   const reportCounts = new Map<string, Record<ReportKind, number>>();
   if (reports) {
     for (const r of reports) {
-      let id = byReport.get(r);
-      if (id === undefined) {
-        const hit = index.at([r.lon, r.lat])[0];
-        id = hit ? String(hit.id) : "";
-        byReport.set(r, id);
-      }
+      const hit = index.at([r.lon, r.lat])[0];
+      const id = hit ? String(hit.id) : "";
       if (!id) continue;
       const counts = reportCounts.get(id) ?? { parking: 0, narrow: 0, works: 0, furniture: 0, other: 0 };
       counts[reportKind(r.type, config)] += 1;
