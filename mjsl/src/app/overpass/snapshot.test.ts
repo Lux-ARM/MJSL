@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { FeatureCollection } from "geojson";
-import { decodeSnapshot, fetchSnapshot, gzipText, trimCollection } from "./snapshot.js";
+import { decodeSnapshot, fetchSnapshot, fetchSnapshotManifest, gzipText, trimCollection } from "./snapshot.js";
 
 const sample: FeatureCollection = {
   type: "FeatureCollection",
@@ -37,5 +37,35 @@ describe("OSM snapshots", () => {
   it("returns null for a missing file or a network error, so the caller can fall back", async () => {
     expect(await fetchSnapshot("x", (() => Promise.resolve(new Response("", { status: 404 }))) as typeof fetch)).toBeNull();
     expect(await fetchSnapshot("x", (() => Promise.reject(new Error("offline"))) as typeof fetch)).toBeNull();
+  });
+
+  it("revalidates a snapshot when forceReload is set", async () => {
+    let seen: RequestInit | undefined;
+    const mock = ((_: unknown, init?: RequestInit) => {
+      seen = init;
+      return Promise.resolve(new Response(JSON.stringify(sample)));
+    }) as unknown as typeof fetch;
+    expect(await fetchSnapshot("reload-test", mock, { forceReload: true })).not.toBeNull();
+    expect(seen?.cache).toBe("no-cache");
+  });
+
+  it("reads the snapshot manifest and rejects a missing or malformed one", async () => {
+    const manifest = { generatedAt: "2026-11-22T00:00:00.000Z", version: "v1", files: { r0c0: "abc" } };
+    const ok = (() => Promise.resolve(new Response(JSON.stringify(manifest)))) as typeof fetch;
+    expect(await fetchSnapshotManifest(ok)).toEqual(manifest);
+
+    let seen: RequestInit | undefined;
+    const revalidated = ((_: unknown, init?: RequestInit) => {
+      seen = init;
+      return Promise.resolve(new Response(JSON.stringify(manifest)));
+    }) as unknown as typeof fetch;
+    expect(await fetchSnapshotManifest(revalidated, { forceReload: true })).toEqual(manifest);
+    expect(seen?.cache).toBe("no-cache");
+
+    const missing = (() => Promise.resolve(new Response("", { status: 404 }))) as typeof fetch;
+    expect(await fetchSnapshotManifest(missing)).toBeNull();
+
+    const malformed = (() => Promise.resolve(new Response(JSON.stringify({ version: 1 })))) as typeof fetch;
+    expect(await fetchSnapshotManifest(malformed)).toBeNull();
   });
 });

@@ -10,6 +10,38 @@ const PENDING_SOURCE = "report-pending";
 
 /** Tracks which map instance already has the static zone polygon geometries uploaded in ZONE_SOURCE. */
 const uploadedZoneGeometryKey = new WeakMap<MapLibreMap, string>();
+const zoneGeometryKeyCache = new WeakMap<Zone[], string>();
+
+/**
+ * Cheap fingerprint of every zone coordinate, so a reload that changes the IRIS
+ * boundaries re-uploads the polygons, while a score-only update keeps the fast path.
+ * Cached per zones array: profile changes do not re-hash the 77,000 vertices.
+ */
+export function zoneGeometryKey(zones: Zone[]): string {
+  const cached = zoneGeometryKeyCache.get(zones);
+  if (cached) return cached;
+  let hash = 2166136261;
+  const mix = (n: number) => {
+    hash ^= Math.round(n * 1e6) | 0;
+    hash = Math.imul(hash, 16777619);
+  };
+  for (const zone of zones) {
+    mix(zone.geometry.type === "Polygon" ? 1 : 2);
+    const polygons = zone.geometry.type === "Polygon" ? [zone.geometry.coordinates] : zone.geometry.coordinates;
+    for (const polygon of polygons) {
+      for (const ring of polygon) {
+        mix(ring.length);
+        for (const point of ring) {
+          mix(point[0]!);
+          mix(point[1]!);
+        }
+      }
+    }
+  }
+  const key = `${zones.length}:${(hash >>> 0).toString(36)}`;
+  zoneGeometryKeyCache.set(zones, key);
+  return key;
+}
 
 /**
  * One green-to-red scale for every layer: 0 = total obstacle (red), 1 = none (green).
@@ -155,7 +187,7 @@ export function syncZoneData(
     return;
   }
 
-  const geomKey = `${zones.length}:${zones[0]?.id ?? ""}:${zones[zones.length - 1]?.id ?? ""}`;
+  const geomKey = zoneGeometryKey(zones);
   if (uploadedZoneGeometryKey.get(instance) !== geomKey) {
     // First upload for this map style: upload full polygon geometries once
     source.setData(zonesGeojson(zones, scores, config, layer));

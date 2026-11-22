@@ -35,11 +35,19 @@ const inFlight = new Map<string, Promise<OverpassResult>>();
  * is used until it expires and the network is only touched on a miss or an
  * explicit refresh.
  */
+export interface LoadPresetOptions {
+  /** Skip the snapshot and the cache TTL, and ask Overpass for fresh data. */
+  forceRefresh?: boolean;
+  /** Use the snapshot, but revalidate it with the server instead of the in-memory copy. */
+  reloadSnapshot?: boolean;
+}
+
 export function loadPreset(
   preset: OverpassPreset,
-  options: { forceRefresh?: boolean } = {},
+  options: LoadPresetOptions = {},
 ): Promise<OverpassResult> {
-  const dedupeKey = `${preset.id}:${options.forceRefresh ? "refresh" : "normal"}`;
+  const mode = options.forceRefresh ? "refresh" : options.reloadSnapshot ? "reload" : "normal";
+  const dedupeKey = `${preset.id}:${mode}`;
   const pending = inFlight.get(dedupeKey);
   if (pending) return pending;
 
@@ -50,12 +58,13 @@ export function loadPreset(
 
 async function fetchPreset(
   preset: OverpassPreset,
-  { forceRefresh = false }: { forceRefresh?: boolean } = {},
+  { forceRefresh = false, reloadSnapshot = false }: LoadPresetOptions = {},
 ): Promise<OverpassResult> {
   // A prepared copy shipped with the app comes first: the app then works with no
-  // Overpass at all. "Refresh" skips it and asks Overpass for fresh data.
+  // Overpass at all. "Refresh" skips it and asks Overpass for fresh data; "reload"
+  // keeps the snapshot but revalidates it, so a new deployment is picked up quickly.
   if (!forceRefresh) {
-    const snapshot = await fetchSnapshot(preset.id);
+    const snapshot = await fetchSnapshot(preset.id, fetch, { forceReload: reloadSnapshot });
     if (snapshot) return { geojson: snapshot, fromCache: true, timestamp: Date.now() };
   }
 

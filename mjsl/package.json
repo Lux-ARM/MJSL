@@ -15,7 +15,8 @@
     "data:amp": "node scripts/fetchAmp.mjs",
     "data:zones": "node scripts/fetchAmp.mjs && node scripts/clipZones.mjs",
     "data:reports": "node scripts/prepareReports.mjs",
-    "data:osm": "vite-node scripts/fetchOsm.ts"
+    "data:osm": "vite-node scripts/fetchOsm.ts",
+    "data:manifest": "node scripts/writeOsmManifest.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.9.0",

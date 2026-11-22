@@ -71,15 +71,48 @@ export async function decodeSnapshot(bytes: ArrayBuffer): Promise<FeatureCollect
 }
 
 const snapshotUrl = (presetId: string) => `${import.meta.env.BASE_URL}data/osm/${presetId}.geojson.gz`;
+const manifestUrl = () => `${import.meta.env.BASE_URL}data/osm/manifest.json`;
 const memorySnapshots = new Map<string, FeatureCollection>();
 
-export async function fetchSnapshot(presetId: string, fetchImpl: typeof fetch = fetch): Promise<FeatureCollection | null> {
-  if (fetchImpl === fetch) {
+export interface SnapshotOptions {
+  /** Revalidate the file with the server even if this session already decoded it. */
+  forceReload?: boolean;
+}
+
+/** Hashes of every snapshot file, made by `npm run data:osm` (or `data:manifest`). */
+export interface SnapshotManifest {
+  generatedAt: string;
+  version: string;
+  files: Record<string, string>;
+}
+
+/** The current deployment's snapshot manifest, or null when it is missing/unreadable. */
+export async function fetchSnapshotManifest(
+  fetchImpl: typeof fetch = fetch,
+  options: SnapshotOptions = {},
+): Promise<SnapshotManifest | null> {
+  try {
+    const response = await fetchImpl(manifestUrl(), options.forceReload ? { cache: "no-cache" } : undefined);
+    if (!response.ok) return null;
+    const data = (await response.json()) as Partial<SnapshotManifest> | null;
+    if (!data || typeof data.version !== "string" || typeof data.files !== "object" || data.files === null) return null;
+    return data as SnapshotManifest;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchSnapshot(
+  presetId: string,
+  fetchImpl: typeof fetch = fetch,
+  options: SnapshotOptions = {},
+): Promise<FeatureCollection | null> {
+  if (!options.forceReload && fetchImpl === fetch) {
     const cached = memorySnapshots.get(presetId);
     if (cached) return cached;
   }
   try {
-    const response = await fetchImpl(snapshotUrl(presetId));
+    const response = await fetchImpl(snapshotUrl(presetId), options.forceReload ? { cache: "no-cache" } : undefined);
     if (!response.ok) return null;
     const decoded = await decodeSnapshot(await response.arrayBuffer());
     if (decoded && fetchImpl === fetch) {

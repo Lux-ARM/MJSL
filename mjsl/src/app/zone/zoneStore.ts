@@ -23,6 +23,7 @@ import {
   type LngLat,
 } from "../../domain/zone/index.js";
 import { loadPreset } from "../overpass/client.js";
+import { fetchSnapshotManifest, type SnapshotManifest } from "../overpass/snapshot.js";
 import { OSM_TILES, SOCIAL_TILES } from "../overpass/zonePreset.js";
 import { useAppStore, type LoadState } from "../state.js";
 import { getAltitudes } from "./elevationClient.js";
@@ -47,6 +48,8 @@ interface AutoDataStatus {
 export interface ZoneState {
   loadState: LoadState;
   loadProgress: { done: number; total: number } | null;
+  /** A background reload of the deployed snapshots; the map stays usable. */
+  refreshing: boolean;
   error: string | null;
   zones: Zone[];
   /** profile id -> zone id -> score */
@@ -75,7 +78,7 @@ export interface ZoneState {
   target: { lon: number; lat: number; accuracyM: number; nonce: number } | null;
   auto: AutoDataStatus;
 
-  load: (options?: { forceRefresh?: boolean }) => Promise<void>;
+  load: (options?: { reloadSnapshots?: boolean }) => Promise<void>;
   setProfile: (id: string) => void;
   setLayer: (layer: MapLayer) => void;
   setViewport: (viewport: MapBounds) => void;
@@ -119,15 +122,42 @@ function scoreEverything(
 
 const rankingOf = (zones: Zone[], scores: ZoneState["scores"], profileId: string) => rankZones(zones, scores[profileId] ?? {}, ZONE_CONFIG);
 
+/** Manifest version of the snapshots currently loaded in `inputs.osm`. */
+let osmManifestVersion: string | null = null;
+
+interface CityData {
+  /** Null when a reload found the deployed manifest unchanged. */
+  geojson: FeatureCollection | null;
+  fromCache: boolean;
+  failed: number;
+  unchanged: boolean;
+}
+
 /**
  * Loads the city's OpenStreetMap data. It fetches the local/cached snapshots concurrently
  * using a worker pool for fast loading (< 700ms). Any tile not available locally falls back
  * to the polite sequential Overpass query with pauses to prevent 429/504 errors.
+ *
+ * `reloadSnapshots` revalidates the deployed files with the server and skips the whole read
+ * when the manifest version has not changed. It never sends the 60 tile queries to Overpass:
+ * that path is reserved for `forceRefresh` on the small overlay presets.
  */
 async function loadCity(
-  _forceRefresh: boolean,
+  reloadSnapshots: boolean,
   onProgress: (done: number, total: number) => void,
-): Promise<{ geojson: FeatureCollection; fromCache: boolean; failed: number }> {
+): Promise<CityData> {
+  // Only trust the manifest after a reload: the initial load may have come from an
+  // older HTTP cache, so comparing its version to a fresh manifest could make a later
+  // reload skip files that were never actually revalidated.
+  let manifest: SnapshotManifest | null = null;
+  if (reloadSnapshots) {
+    manifest = await fetchSnapshotManifest(fetch, { forceReload: true });
+    if (manifest && osmManifestVersion === manifest.version) {
+      onProgress(OSM_TILES.length, OSM_TILES.length);
+      return { geojson: null, fromCache: true, failed: 0, unchanged: true };
+    }
+  }
+
   const seen = new Set<string>();
   const features: FeatureCollection["features"] = [];
   let fromCache = true;
@@ -154,7 +184,7 @@ async function loadCity(
     while (cursor < OSM_TILES.length) {
       const i = cursor++;
       try {
-        const result = await loadPreset(OSM_TILES[i]!, { forceRefresh: false });
+        const result = await loadPreset(OSM_TILES[i]!, { reloadSnapshot: reloadSnapshots });
         if (!result.fromCache) fromCache = false;
         take(result.geojson);
       } catch (error) {
@@ -175,7 +205,7 @@ async function loadCity(
     const next: number[] = [];
     for (const i of pending) {
       try {
-        const result = await loadPreset(OSM_TILES[i]!, { forceRefresh: false });
+        const result = await loadPreset(OSM_TILES[i]!, { reloadSnapshot: reloadSnapshots });
         if (!result.fromCache) {
           fromCache = false;
           await new Promise((r) => setTimeout(r, 1500));
@@ -194,7 +224,7 @@ async function loadCity(
   await Promise.allSettled(
     SOCIAL_TILES.map(async (tile) => {
       try {
-        take((await loadPreset(tile, { forceRefresh: false })).geojson);
+        take((await loadPreset(tile, { reloadSnapshot: reloadSnapshots })).geojson);
       } catch {
         /* the indicators built on these stay "no data" */
       }
@@ -203,7 +233,11 @@ async function loadCity(
 
   if (failed === OSM_TILES.length) throw lastError;
   onProgress(OSM_TILES.length, OSM_TILES.length);
-  return { geojson: { type: "FeatureCollection", features }, fromCache, failed };
+  // An incomplete in-memory city must not be marked as this manifest version: the
+  // next reload has to try the missing tiles again. The initial load leaves the
+  // version null, so the first reload always verifies the files once.
+  osmManifestVersion = reloadSnapshots && failed === 0 ? manifest?.version ?? null : null;
+  return { geojson: { type: "FeatureCollection", features }, fromCache, failed, unchanged: false };
 }
 
 async function getJson<T>(url: string): Promise<T | undefined> {
@@ -303,6 +337,7 @@ const IDLE_AUTO: AutoDataStatus = { slope: "idle", slopeProgress: null, slopeErr
 export const useZoneStore = create<ZoneState>((set, get) => ({
   loadState: "idle",
   loadProgress: null,
+  refreshing: false,
   error: null,
   zones: [],
   scores: {},
@@ -323,27 +358,37 @@ export const useZoneStore = create<ZoneState>((set, get) => ({
   target: null,
   auto: IDLE_AUTO,
 
-  load: async ({ forceRefresh = false } = {}) => {
-    if (get().loadState === "loading") return;
-    set({
-      loadState: "loading",
-      loadProgress: { done: 0, total: OSM_TILES.length },
-      error: null,
-      auto: IDLE_AUTO,
-    });
-    say("Chargement des zones, des donnees OpenStreetMap, des signalements et de la carte de bruit...");
+  load: async ({ reloadSnapshots = false } = {}) => {
+    if (get().loadState === "loading" || get().refreshing) return;
+    // Once the map is ready, "Recharger les donnees" revalidates the deployed snapshots
+    // in the background: no full-screen overlay and no 60 Overpass queries.
+    const background = reloadSnapshots && get().loadState === "ready";
+    if (background) {
+      set({ refreshing: true, error: null });
+      say("Rechargement des donnees publiees...");
+    } else {
+      set({
+        loadState: "loading",
+        loadProgress: { done: 0, total: OSM_TILES.length },
+        error: null,
+        auto: IDLE_AUTO,
+      });
+      say("Chargement des zones, des donnees OpenStreetMap, des signalements et de la carte de bruit...");
+    }
     try {
       const [osm, { zones: collection, amp }, reports, noiseIndex] = await Promise.all([
-        loadCity(forceRefresh, (done, total) => {
+        loadCity(reloadSnapshots, (done, total) => {
           set({ loadProgress: { done, total } });
-          say(`Chargement de la ville : zone ${Math.min(done + 1, total)} sur ${total}...`);
+          say(`${background ? "Rechargement" : "Chargement"} de la ville : zone ${Math.min(done + 1, total)} sur ${total}...`);
         }),
         loadAmp(),
         getJson<Report[]>(REPORTS_URL),
         loadNoiseIndex(),
       ]);
       if (!collection) throw new Error("Les zones (data/amp/zones.geojson) sont introuvables : lance « npm run data:zones ».");
-      inputs = { collection, osm: osm.geojson, base: reports, amp, noiseIndex };
+      const osmCollection = osm.unchanged ? inputs?.osm : osm.geojson;
+      if (!osmCollection) throw new Error("Les donnees OpenStreetMap sont introuvables : lance « npm run data:osm ».");
+      inputs = { collection, osm: osmCollection, base: reports, amp, noiseIndex };
       cachedZoneIndex = null;
       cachedBuiltZones = null;
       cachedSlopedZones = null;
@@ -353,20 +398,25 @@ export const useZoneStore = create<ZoneState>((set, get) => ({
         ownReports,
         loadProgress: { done: OSM_TILES.length, total: OSM_TILES.length },
       });
-      say("Calcul des indicateurs d'accessibilite et notation des zones...");
+      say(`${background ? "Recalcul" : "Calcul"} des indicateurs d'accessibilite et notation des zones...`);
       // Microtask yield: allows the browser to paint progress updates and smooth animations before CPU computation
       await new Promise((resolve) => setTimeout(resolve, 30));
-      recompute({ rebuild: true, extraState: { loadState: "ready", loadProgress: null } });
+      recompute({ rebuild: true, extraState: { loadState: "ready", loadProgress: null, refreshing: false } });
       say(
         `${useZoneStore.getState().zones.length} zones notees` +
-          (osm.fromCache ? " (cache local)." : " (Overpass).") +
+          (osm.unchanged ? " ; donnees OSM deja a jour." : osm.fromCache ? " (snapshots locaux)." : " (Overpass).") +
           (osm.failed ? ` ${osm.failed} partie(s) de la ville n'ont pas pu etre chargees : recharge la page.` : ""),
       );
       await loadSlope();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      set({ loadState: "error", loadProgress: null, error: message });
-      say("Echec du chargement des zones. Verifie la connexion.");
+      if (background) {
+        set({ refreshing: false, loadProgress: null, error: message });
+        say("Echec du rechargement. Les donnees actuelles sont conservees.");
+      } else {
+        set({ loadState: "error", loadProgress: null, refreshing: false, error: message });
+        say("Echec du chargement des zones. Verifie la connexion.");
+      }
     }
   },
 

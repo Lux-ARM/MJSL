@@ -97,7 +97,7 @@ export function LoadingOverlay() {
               variant="default"
               size="sm"
               className="mt-2 gap-2"
-              onClick={() => void load({ forceRefresh: true })}
+              onClick={() => void load({ reloadSnapshots: true })}
             >
               <RefreshCw className="size-3.5" />
               Réessayer

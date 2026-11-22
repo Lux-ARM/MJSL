@@ -52,10 +52,14 @@ npm run data:noise     # carte de bruit officielle
 npm run data:osm       # OpenStreetMap, copie locale (10 a 30 min, reprenable)
 ```
 
-L'application lit d'abord ces fichiers dans `public/data/` ; elle ne contacte Overpass que
-si la copie OSM manque, ou si on clique « Rafraichir depuis Overpass ». Pour une
-presentation, lance `npm run build && npm run preview` et ouvre l'app une fois en ligne
-avant (les altitudes IGN sont mises en cache dans le navigateur).
+`data:osm` ecrit aussi `public/data/osm/manifest.json`, qui versionne les snapshots.
+L'application lit d'abord ces fichiers dans `public/data/` ; le bouton « Recharger les
+donnees » ne contacte pas Overpass, il recharge les snapshots deployes (et ne refait rien
+si le manifest n'a pas change). Pour mettre a jour OpenStreetMap, relance `npm run data:osm`
+puis redeploie. Seuls les petits calques « Indices OSM » gardent un bouton
+« Rafraichir depuis Overpass ». Pour une presentation, lance `npm run build && npm run
+preview` et ouvre l'app une fois en ligne avant (les altitudes IGN sont mises en cache
+dans le navigateur).
 
 ## Ajouter un signalement
 
