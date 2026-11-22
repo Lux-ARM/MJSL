@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ZONE_CONFIG as config, scoreZone, type Zone } from "../../domain/zone/index.js";
-import { gradientColour, layerValue, zonesGeojson } from "./zoneLayers.js";
+import { gradientColour, layerValue, zoneGeometryKey, zonesGeojson } from "./zoneLayers.js";
 
 const zone = (id: string, values: Record<string, number>): Zone => ({
   id, name: id, zoneType: "habitat", arrondissement: "Marseille 1er Arrondissement",
@@ -35,5 +35,24 @@ describe("map layers", () => {
     expect(props("political").cls).toBe("none");
     expect(props("political").colour).toBe(config.classes.colours.none);
     expect(props("physical").colour).not.toBe(props("economic").colour);
+  });
+
+  it("re-uploads the map only when the zone shapes change", () => {
+    const a = zone("a", { noise: 85 });
+    const b = zone("b", { noise: 50 });
+    const zones = [a, b];
+    const base = zoneGeometryKey(zones);
+    expect(zoneGeometryKey(zones)).toBe(base); // same array, cached
+    expect(zoneGeometryKey([a, b])).toBe(base); // new array, same coordinates
+    expect(zoneGeometryKey([a, b, zone("c", {})])).not.toBe(base); // a zone was added
+
+    const moved: Zone = {
+      ...a,
+      geometry: {
+        type: "Polygon",
+        coordinates: [[[5.35, 43.28], [5.37, 43.28], [5.36, 43.29], [5.35, 43.29], [5.35, 43.28]]],
+      },
+    };
+    expect(zoneGeometryKey([moved, b])).not.toBe(base); // a boundary moved
   });
 });

@@ -18,6 +18,7 @@ import { osmToGeojson } from "../src/app/overpass/osmToGeojson.ts";
 import { OVERPASS_PRESETS } from "../src/app/overpass/presets.ts";
 import { SOCIAL_TILES, OSM_TILES } from "../src/app/overpass/zonePreset.ts";
 import { gzipText, trimCollection } from "../src/app/overpass/snapshot.ts";
+import { writeOsmManifest } from "./osmManifest.mjs";
 
 const OUT = join(dirname(fileURLToPath(import.meta.url)), "..", "public", "data", "osm");
 const ENDPOINTS = [
@@ -83,6 +84,8 @@ const total = (await readdir(OUT)).filter((f) => f.endsWith(".gz"));
 let bytes = 0;
 for (const f of total) bytes += (await stat(join(OUT, f))).size;
 console.log(`\n${total.length}/${jobs.length} files in ${OUT} (${(bytes / 1024 / 1024).toFixed(1)} MB), ${features} objects downloaded this run.`);
+const manifest = await writeOsmManifest(OUT);
+console.log(`manifest.json: ${Object.keys(manifest.files).length} snapshots, version ${manifest.version.slice(0, 12)}.`);
 if (failed.length) {
   console.log(`Missing: ${failed.join(", ")}\nRun the command again later to fetch only those.`);
   process.exitCode = 1;

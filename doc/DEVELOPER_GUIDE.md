@@ -65,7 +65,7 @@ hand** except optional citizen reports, kept in the browser.
     ├── scripts/                   one-off data preparation (Node), writes into public/data/
     ├── public/data/               every dataset the app loads at runtime (~11 MB, committed)
     │   ├── amp/                   zones, transit, tourism, QPV, projects (Metropole portal)
-    │   ├── osm/                   OpenStreetMap snapshots, one .geojson.gz per preset
+    │   ├── osm/                   OpenStreetMap snapshots, one .geojson.gz per preset + manifest.json
     │   ├── noise_lden_all.geojson official noise map
     │   └── reports.json           citizens' reports
     └── src/
@@ -144,12 +144,14 @@ flowchart LR
     N[noise_lden_all.geojson]
     R[reports.json]
     O[osm/*.geojson.gz]
+    M[osm/manifest.json]
   end
   IGN[(IGN altimetry API)]
   OV[(Overpass API)]
   IDB[(IndexedDB)]
 
   O -->|snapshot first| L[overpass/client.ts loadPreset]
+  M -->|version check on reload| S
   OV -->|only if no snapshot, or 'Rafraichir'| L
   L <--> IDB
   Z & A & N & R & L --> S[zone/zoneStore.ts load]
@@ -181,8 +183,8 @@ and the inspector always agree. A full rebuild takes well under a second.
   visibility), and the `status` line, which is an `aria-live` region: every long
   operation reports progress there in plain words.
 * `app/zone/zoneStore.ts` (`useZoneStore`): zones, scores, ranking, selected profile and
-  map layer, selection, report filters, own reports, the "place a report" mode, and the
-  slope progress.
+  map layer, selection, report filters, own reports, the "place a report" mode, the
+  slope progress, and the background reload state (`refreshing`).
 
 Components subscribe with selectors (`useZoneStore((s) => s.zones)`); non-React code
 reads `useZoneStore.getState()`.
@@ -194,11 +196,21 @@ For each preset, in order:
 1. **Snapshot** `public/data/osm/<preset id>.geojson.gz` (made by `npm run data:osm`).
    This is what normally serves the app, so it does not depend on Overpass.
 2. **IndexedDB cache** (`overpass` store), if younger than 7 days.
-3. **Overpass**, trying three public mirrors with a 70 s timeout each.
+3. **Overpass**, trying three public mirrors with a 15 s timeout each.
 4. A **stale cache** if every mirror failed.
 
-"Rafraichir depuis Overpass" skips steps 1 and 2. Concurrent calls for the same preset
-share one request.
+"Rafraichir depuis Overpass" (the small overlay presets) skips steps 1 and 2. Concurrent
+calls for the same preset share one request.
+
+The city button **"Recharger les donnees"** does not query Overpass. It fetches
+`public/data/osm/manifest.json`; when its `version` differs from the loaded one it
+revalidates the snapshots with the server (304 when the files did not change), then
+rebuilds the zones once. The first reload after opening the app verifies all snapshots
+once; later reloads skip everything while the version is unchanged. This is a background
+operation (`refreshing` state), so the full-screen loading overlay and the map stay
+untouched. To publish new OSM data, run `npm run data:osm -- --force` (or
+`npm run data:manifest` after replacing files by hand) and redeploy; the browser never
+sends the 60 tile queries to Overpass.
 
 There are two families of presets:
 
@@ -298,6 +310,7 @@ and do **not** depend on the profile. The profile only decides each dimension's 
 | `noise_lden_all.geojson` | `npm run data:noise` | Bruit multiexposition Lden, Metropole AMP, Licence Ouverte 2.0 |
 | `reports.json` | `npm run data:reports` from `data/raw/signalements_voirie_marseille.geojson` | "Galere pietons" (Marsactu). **Reuse licence still to be confirmed.** |
 | `osm/*.geojson.gz` | `npm run data:osm` (10-30 min, resumable; `-- --force` to redo all) | OpenStreetMap, ODbL |
+| `osm/manifest.json` | written by `data:osm`, or `npm run data:manifest` after replacing files | hashes and version of the snapshots |
 
 The scripts are idempotent and only write into `public/data/`. Re-run one after a source
 updates, check the console summary, run the app, and commit the regenerated files.
@@ -334,6 +347,13 @@ inspector automatically.
 
 The inspector, the coverage list ("Donnees disponibles par indicateur"), the dimension
 bars and the export pick it up from the config.
+
+### Refresh the OSM data
+Run `npm run data:osm -- --force` (it also rewrites `public/data/osm/manifest.json`),
+check the summary, run the app, and commit the snapshots plus the manifest. The app's
+"Recharger les donnees" detects the new manifest version and revalidates the files; it
+never sends the 60 tile queries to Overpass. If snapshots were replaced without running
+the script, run `npm run data:manifest` so the version changes.
 
 ### Add a dataset (another open-data file)
 Write a script in `scripts/` that writes into `public/data/`, add an `npm run data:*`

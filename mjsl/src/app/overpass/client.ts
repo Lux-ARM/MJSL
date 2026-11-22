@@ -9,7 +9,7 @@ import type { OverpassPreset } from "./presets.js";
  * WITHOUT CORS headers, which a browser reports as a "CORS error" with no status:
  * the request itself is fine, the server is just refusing. Another mirror usually isn't.
  */
-const REQUEST_TIMEOUT_MS = 70_000;
+const REQUEST_TIMEOUT_MS = 15_000;
 
 const ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
@@ -35,11 +35,19 @@ const inFlight = new Map<string, Promise<OverpassResult>>();
  * is used until it expires and the network is only touched on a miss or an
  * explicit refresh.
  */
+export interface LoadPresetOptions {
+  /** Skip the snapshot and the cache TTL, and ask Overpass for fresh data. */
+  forceRefresh?: boolean;
+  /** Use the snapshot, but revalidate it with the server instead of the in-memory copy. */
+  reloadSnapshot?: boolean;
+}
+
 export function loadPreset(
   preset: OverpassPreset,
-  options: { forceRefresh?: boolean } = {},
+  options: LoadPresetOptions = {},
 ): Promise<OverpassResult> {
-  const dedupeKey = `${preset.id}:${options.forceRefresh ? "refresh" : "normal"}`;
+  const mode = options.forceRefresh ? "refresh" : options.reloadSnapshot ? "reload" : "normal";
+  const dedupeKey = `${preset.id}:${mode}`;
   const pending = inFlight.get(dedupeKey);
   if (pending) return pending;
 
@@ -50,12 +58,13 @@ export function loadPreset(
 
 async function fetchPreset(
   preset: OverpassPreset,
-  { forceRefresh = false }: { forceRefresh?: boolean } = {},
+  { forceRefresh = false, reloadSnapshot = false }: LoadPresetOptions = {},
 ): Promise<OverpassResult> {
   // A prepared copy shipped with the app comes first: the app then works with no
-  // Overpass at all. "Refresh" skips it and asks Overpass for fresh data.
+  // Overpass at all. "Refresh" skips it and asks Overpass for fresh data; "reload"
+  // keeps the snapshot but revalidates it, so a new deployment is picked up quickly.
   if (!forceRefresh) {
-    const snapshot = await fetchSnapshot(preset.id);
+    const snapshot = await fetchSnapshot(preset.id, fetch, { forceReload: reloadSnapshot });
     if (snapshot) return { geojson: snapshot, fromCache: true, timestamp: Date.now() };
   }
 
@@ -72,8 +81,10 @@ async function fetchPreset(
     await writeCache(key, geojson);
     return { geojson, fromCache: false, timestamp: Date.now() };
   } catch (error) {
-    // A stale cache beats an empty map when Overpass is down or throttling.
+    // A stale cache or local snapshot beats an empty map when Overpass is down or throttling.
     if (cached) return { geojson: cached.payload, fromCache: true, timestamp: cached.timestamp };
+    const fallbackSnapshot = await fetchSnapshot(preset.id);
+    if (fallbackSnapshot) return { geojson: fallbackSnapshot, fromCache: true, timestamp: Date.now() };
     throw error;
   }
 }

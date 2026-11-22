@@ -22,6 +22,7 @@ export function ZonePanel() {
   const profileId = useZoneStore((s) => s.profileId);
   const visible = useZoneStore((s) => s.visible);
   const auto = useZoneStore((s) => s.auto);
+  const refreshing = useZoneStore((s) => s.refreshing);
   const load = useZoneStore((s) => s.load);
   const setProfile = useZoneStore((s) => s.setProfile);
   const toggleVisible = useZoneStore((s) => s.toggleVisible);
@@ -50,7 +51,7 @@ export function ZonePanel() {
       }),
     [zones],
   );
-  const loading = loadState === "loading";
+  const loading = loadState === "loading" || refreshing;
   const slopeStatus =
     auto.slope === "running"
       ? `altitudes IGN en cours${auto.slopeProgress?.total ? ` (${auto.slopeProgress.done} / ${auto.slopeProgress.total} points)` : "..."}`
@@ -71,8 +72,8 @@ export function ZonePanel() {
           <CardAction className="tabular-nums text-xs text-muted-foreground">{zones.length} IRIS</CardAction>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
-          <Button type="button" variant="outline" className="w-full" onClick={() => void load({ forceRefresh: loadState === "ready" })} disabled={loading}>
-            {loading ? "Chargement..." : loadState === "ready" ? "Rafraichir les donnees" : "Charger les zones"}
+          <Button type="button" variant="outline" className="w-full" onClick={() => void load({ reloadSnapshots: loadState === "ready" })} disabled={loading}>
+            {loadState === "loading" ? "Chargement..." : refreshing ? "Rechargement..." : loadState === "ready" ? "Recharger les donnees" : "Charger les zones"}
           </Button>
           {error && <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">{error}</p>}
 
