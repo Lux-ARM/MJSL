@@ -26,6 +26,7 @@ import {
   type ZoneScore,
   type LngLat,
 } from "../../domain/zone/index.js";
+import { fetchDataManifest, versionedUrl } from "../dataManifest.js";
 import { loadPreset } from "../overpass/client.js";
 import { fetchSnapshotManifest, type SnapshotManifest } from "../overpass/snapshot.js";
 import { OSM_TILES, SOCIAL_TILES } from "../overpass/zonePreset.js";
@@ -131,6 +132,8 @@ const rankingOf = (zones: Zone[], scores: ZoneState["scores"], profileId: string
 
 /** Manifest version of the snapshots currently loaded in `inputs.osm`. */
 let osmManifestVersion: string | null = null;
+/** Global data manifest version of the files currently loaded into `inputs`. */
+let dataManifestVersion: string | null = null;
 
 interface CityData {
   /** Null when a reload found the deployed manifest unchanged. */
@@ -152,6 +155,7 @@ interface CityData {
 async function loadCity(
   reloadSnapshots: boolean,
   onProgress: (done: number, total: number) => void,
+  dataVersion?: string,
 ): Promise<CityData> {
   // Only trust the manifest after a reload: the initial load may have come from an
   // older HTTP cache, so comparing its version to a fresh manifest could make a later
@@ -191,7 +195,7 @@ async function loadCity(
     while (cursor < OSM_TILES.length) {
       const i = cursor++;
       try {
-        const result = await loadPreset(OSM_TILES[i]!, { reloadSnapshot: reloadSnapshots });
+        const result = await loadPreset(OSM_TILES[i]!, { reloadSnapshot: reloadSnapshots, dataVersion });
         if (!result.fromCache) fromCache = false;
         take(result.geojson);
       } catch (error) {
@@ -212,7 +216,7 @@ async function loadCity(
     const next: number[] = [];
     for (const i of pending) {
       try {
-        const result = await loadPreset(OSM_TILES[i]!, { reloadSnapshot: reloadSnapshots });
+        const result = await loadPreset(OSM_TILES[i]!, { reloadSnapshot: reloadSnapshots, dataVersion });
         if (!result.fromCache) {
           fromCache = false;
           await new Promise((r) => setTimeout(r, 1500));
@@ -231,7 +235,7 @@ async function loadCity(
   await Promise.allSettled(
     SOCIAL_TILES.map(async (tile) => {
       try {
-        take((await loadPreset(tile, { reloadSnapshot: reloadSnapshots })).geojson);
+        take((await loadPreset(tile, { reloadSnapshot: reloadSnapshots, dataVersion })).geojson);
       } catch {
         /* the indicators built on these stay "no data" */
       }
@@ -247,9 +251,9 @@ async function loadCity(
   return { geojson: { type: "FeatureCollection", features }, fromCache, failed, unchanged: false };
 }
 
-async function getJson<T>(url: string, options: { noCache?: boolean } = {}): Promise<T | undefined> {
+async function getJson<T>(url: string, options: { noCache?: boolean; version?: string } = {}): Promise<T | undefined> {
   try {
-    const response = await fetch(url, options.noCache ? { cache: "no-cache" } : undefined);
+    const response = await fetch(versionedUrl(url, options.version), options.noCache ? { cache: "no-cache" } : undefined);
     return response.ok ? ((await response.json()) as T) : undefined;
   } catch {
     return undefined;
@@ -257,8 +261,8 @@ async function getJson<T>(url: string, options: { noCache?: boolean } = {}): Pro
 }
 
 /** The official noise map, trimmed to the study area (npm run data:noise). */
-async function loadNoiseIndex(): Promise<NoiseIndex | undefined> {
-  const data = await getJson<FeatureCollection>(NOISE_MAP_URL);
+async function loadNoiseIndex(dataVersion?: string): Promise<NoiseIndex | undefined> {
+  const data = await getJson<FeatureCollection>(NOISE_MAP_URL, { version: dataVersion });
   if (!data) return undefined;
   const index = buildNoiseIndex(data);
   return index.size > 0 ? index : undefined;
@@ -269,21 +273,22 @@ async function loadNoiseIndex(): Promise<NoiseIndex | undefined> {
  * transport, tourist offices, priority neighbourhoods and project perimeters. Only the
  * zones are required; each other file is optional and leaves its indicators at "no data".
  */
-async function loadAmp(): Promise<{ zones?: FeatureCollection; amp?: AmpIndex }> {
+async function loadAmp(dataVersion?: string): Promise<{ zones?: FeatureCollection; amp?: AmpIndex }> {
+  const options = { version: dataVersion };
   const [zones, transit, tourism, qpv, projects] = await Promise.all([
-    getJson<FeatureCollection>(AMP_BASE + "zones.geojson"),
-    getJson<AmpData["transit"]>(AMP_BASE + "transit.json"),
-    getJson<AmpData["tourism"]>(AMP_BASE + "tourism.json"),
-    getJson<AmpData["qpv"]>(AMP_BASE + "qpv.geojson"),
-    getJson<AmpData["projects"]>(AMP_BASE + "projects.geojson"),
+    getJson<FeatureCollection>(AMP_BASE + "zones.geojson", options),
+    getJson<AmpData["transit"]>(AMP_BASE + "transit.json", options),
+    getJson<AmpData["tourism"]>(AMP_BASE + "tourism.json", options),
+    getJson<AmpData["qpv"]>(AMP_BASE + "qpv.geojson", options),
+    getJson<AmpData["projects"]>(AMP_BASE + "projects.geojson", options),
   ]);
   const any = transit || tourism || qpv || projects;
   return { zones, amp: any ? buildAmpIndex({ transit, tourism, qpv, projects }) : undefined };
 }
 
 /** Rents, income and public-space shares, all optional. Missing files leave their indicators "no data". */
-async function loadEconomic(reload: boolean): Promise<EconomicIndex | undefined> {
-  const options = { noCache: reload };
+async function loadEconomic(reload: boolean, dataVersion?: string): Promise<EconomicIndex | undefined> {
+  const options = { noCache: reload, version: dataVersion };
   const [rent, income, publicSpace] = await Promise.all([
     getJson<EconomicData["rent"]>(RENT_URL, options),
     getJson<EconomicData["income"]>(INCOME_URL, options),
@@ -387,9 +392,15 @@ export const useZoneStore = create<ZoneState>((set, get) => ({
 
   load: async ({ reloadSnapshots = false } = {}) => {
     if (get().loadState === "loading" || get().refreshing) return;
-    // Once the map is ready, "Recharger les donnees" revalidates the deployed snapshots
-    // in the background: no full-screen overlay and no 60 Overpass queries.
+    // Once the map is ready, "Recharger les donnees" compares the global data manifest
+    // first: if no runtime file changed, nothing is downloaded or rebuilt.
     const background = reloadSnapshots && get().loadState === "ready";
+    const manifest = await fetchDataManifest();
+    const dataVersion = manifest?.version;
+    if (background && dataManifestVersion && dataVersion === dataManifestVersion) {
+      say("Donnees deja a jour : aucun fichier n'a change.");
+      return;
+    }
     if (background) {
       set({ refreshing: true, error: null });
       say("Rechargement des donnees publiees...");
@@ -407,11 +418,11 @@ export const useZoneStore = create<ZoneState>((set, get) => ({
         loadCity(reloadSnapshots, (done, total) => {
           set({ loadProgress: { done, total } });
           say(`${background ? "Rechargement" : "Chargement"} de la ville : zone ${Math.min(done + 1, total)} sur ${total}...`);
-        }),
-        loadAmp(),
-        getJson<Report[]>(REPORTS_URL),
-        loadNoiseIndex(),
-        loadEconomic(reloadSnapshots),
+        }, dataVersion),
+        loadAmp(dataVersion),
+        getJson<Report[]>(REPORTS_URL, { noCache: reloadSnapshots, version: dataVersion }),
+        loadNoiseIndex(dataVersion),
+        loadEconomic(reloadSnapshots, dataVersion),
       ]);
       if (!collection) throw new Error("Les zones (data/amp/zones.geojson) sont introuvables : lance « npm run data:zones ».");
       const osmCollection = osm.unchanged ? inputs?.osm : osm.geojson;
@@ -430,6 +441,8 @@ export const useZoneStore = create<ZoneState>((set, get) => ({
       // Microtask yield: allows the browser to paint progress updates and smooth animations before CPU computation
       await new Promise((resolve) => setTimeout(resolve, 30));
       recompute({ rebuild: true, extraState: { loadState: "ready", loadProgress: null, refreshing: false } });
+      // Baseline only after a complete city load; a partial OSM load must retry next time.
+      dataManifestVersion = osm.failed === 0 ? dataVersion ?? null : null;
       say(
         `${useZoneStore.getState().zones.length} zones notees` +
           (osm.unchanged ? " ; donnees OSM deja a jour." : osm.fromCache ? " (snapshots locaux)." : " (Overpass).") +

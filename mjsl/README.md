@@ -60,9 +60,11 @@ npm run data:public-space  # part d'espaces publics UN-Habitat 11.7.1 (OSM)
 ```
 
 `data:osm` ecrit aussi `public/data/osm/manifest.json`, qui versionne les snapshots.
-L'application lit d'abord ces fichiers dans `public/data/` ; le bouton « Recharger les
-donnees » ne contacte pas Overpass, il recharge les snapshots deployes (et ne refait rien
-si le manifest n'a pas change). Pour mettre a jour OpenStreetMap, relance `npm run data:osm`
+Le fichier global `public/data/manifest.json` est genere automatiquement par Vite au build
+(et au demarrage du serveur de dev) : il couvre tous les fichiers de donnees, pas seulement
+OSM. L'application lit d'abord ces fichiers dans `public/data/` ; le bouton « Recharger les
+donnees » ne contacte pas Overpass : il compare ce manifest global et ne refait rien si
+aucun fichier n'a change. Pour mettre a jour OpenStreetMap, relance `npm run data:osm`
 puis redeploie. Seuls les petits calques « Indices OSM » gardent un bouton
 « Rafraichir depuis Overpass ». Pour une presentation, lance `npm run build && npm run
 preview` et ouvre l'app une fois en ligne avant (les altitudes IGN sont mises en cache
