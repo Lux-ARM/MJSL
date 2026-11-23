@@ -13,8 +13,13 @@ automatiquement a partir de donnees ouvertes, au demarrage.
    - les **signalements des habitants** (« Galere pietons », 1393 points : stationnement
      genant, trottoir etroit ou absent, chantiers, encombrants, terrasses),
    - la carte de bruit officielle, les altitudes IGN (pente), les transports en commun,
-     les offices de tourisme, la pauvrete des menages (IRIS), les quartiers prioritaires
-     et les perimetres de projets urbains.
+     les offices de tourisme, la pauvrete des menages (IRIS 2021), les quartiers prioritaires
+     et les perimetres de projets urbains,
+   - les **loyers observes** de l'Observatoire local des loyers 13 (taux d'effort avec
+     les revenus INSEE FiLoSoFi 2021 ; loyers d'annonce de la Carte des loyers 2025 en
+     controle),
+   - la **part d'espaces publics** calculee selon la methode UN-Habitat 11.7.1 (parcs,
+     places, equipements et rues rapportes a la surface batie).
    Chaque valeur garde sa source (OSM, officiel, signalements). Une donnee absente est
    ignoree, jamais comptee comme 0. Les densites sont par km de rue.
 3. **Six dimensions** (celles du memoire) : physique, sensorielle, cognitive, economique,
@@ -50,6 +55,8 @@ npm run data:zones     # zones (taillees a la cote), transports, offices de tour
 npm run data:reports   # signalements des habitants -> public/data/reports.json
 npm run data:noise     # carte de bruit officielle
 npm run data:osm       # OpenStreetMap, copie locale (10 a 30 min, reprenable)
+npm run data:economy   # loyers OLL 13 + revenus INSEE FiLoSoFi 2021
+npm run data:public-space  # part d'espaces publics UN-Habitat 11.7.1 (OSM)
 ```
 
 `data:osm` ecrit aussi `public/data/osm/manifest.json`, qui versionne les snapshots.

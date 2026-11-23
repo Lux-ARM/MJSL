@@ -3,7 +3,9 @@ import { create } from "zustand";
 import {
   PolygonIndex,
   ZONE_CONFIG,
+  MARSEILLE_TERRITORY,
   buildAmpIndex,
+  buildEconomicIndex,
   buildNoiseIndex,
   buildZones,
   rankZones,
@@ -13,6 +15,8 @@ import {
   withSlope,
   type AmpData,
   type AmpIndex,
+  type EconomicData,
+  type EconomicIndex,
   type NoiseIndex,
   type RankedZone,
   type Report,
@@ -33,6 +37,9 @@ import { locate } from "./locate.js";
 const NOISE_MAP_URL = `${import.meta.env.BASE_URL}data/noise_lden_all.geojson`;
 const REPORTS_URL = `${import.meta.env.BASE_URL}data/reports.json`;
 const AMP_BASE = `${import.meta.env.BASE_URL}data/amp/`;
+const RENT_URL = `${AMP_BASE}rent.json`;
+const INCOME_URL = `${AMP_BASE}income_2021.json`;
+const PUBLIC_SPACE_URL = `${AMP_BASE}public_space.json`;
 
 /** What the map shows for each zone: the profile's combined score, or one dimension. */
 export type MapLayer = "combined" | Dimension;
@@ -240,9 +247,9 @@ async function loadCity(
   return { geojson: { type: "FeatureCollection", features }, fromCache, failed, unchanged: false };
 }
 
-async function getJson<T>(url: string): Promise<T | undefined> {
+async function getJson<T>(url: string, options: { noCache?: boolean } = {}): Promise<T | undefined> {
   try {
-    const response = await fetch(url);
+    const response = await fetch(url, options.noCache ? { cache: "no-cache" } : undefined);
     return response.ok ? ((await response.json()) as T) : undefined;
   } catch {
     return undefined;
@@ -274,8 +281,26 @@ async function loadAmp(): Promise<{ zones?: FeatureCollection; amp?: AmpIndex }>
   return { zones, amp: any ? buildAmpIndex({ transit, tourism, qpv, projects }) : undefined };
 }
 
+/** Rents, income and public-space shares, all optional. Missing files leave their indicators "no data". */
+async function loadEconomic(reload: boolean): Promise<EconomicIndex | undefined> {
+  const options = { noCache: reload };
+  const [rent, income, publicSpace] = await Promise.all([
+    getJson<EconomicData["rent"]>(RENT_URL, options),
+    getJson<EconomicData["income"]>(INCOME_URL, options),
+    getJson<EconomicData["publicSpace"]>(PUBLIC_SPACE_URL, options),
+  ]);
+  return buildEconomicIndex({ rent, income, publicSpace });
+}
+
 /** What the zones are built from. Kept outside the store so a new report re-scores without downloading again. */
-let inputs: { collection: FeatureCollection; osm: FeatureCollection; base: Report[] | undefined; amp?: AmpIndex; noiseIndex?: NoiseIndex } | null = null;
+let inputs: {
+  collection: FeatureCollection;
+  osm: FeatureCollection;
+  base: Report[] | undefined;
+  amp?: AmpIndex;
+  noiseIndex?: NoiseIndex;
+  economic?: EconomicIndex;
+} | null = null;
 /** Altitudes at the grid points, once downloaded (or read from the cache). */
 let terrain: Record<string, number> = {};
 /** Cached spatial index and built zones so report or slope updates never re-run the expensive OSM/noise joins. */
@@ -310,6 +335,8 @@ function recompute(
         osm: inputs.osm,
         ...(inputs.amp ? { amp: inputs.amp } : {}),
         ...(inputs.noiseIndex ? { noiseIndex: inputs.noiseIndex } : {}),
+        ...(inputs.economic ? { economic: inputs.economic } : {}),
+        territory: MARSEILLE_TERRITORY,
         zoneIndex: cachedZoneIndex,
       },
       ZONE_CONFIG,
@@ -373,10 +400,10 @@ export const useZoneStore = create<ZoneState>((set, get) => ({
         error: null,
         auto: IDLE_AUTO,
       });
-      say("Chargement des zones, des donnees OpenStreetMap, des signalements et de la carte de bruit...");
+      say("Chargement des zones, des donnees OpenStreetMap, des signalements, des loyers, des revenus et de la carte de bruit...");
     }
     try {
-      const [osm, { zones: collection, amp }, reports, noiseIndex] = await Promise.all([
+      const [osm, { zones: collection, amp }, reports, noiseIndex, economic] = await Promise.all([
         loadCity(reloadSnapshots, (done, total) => {
           set({ loadProgress: { done, total } });
           say(`${background ? "Rechargement" : "Chargement"} de la ville : zone ${Math.min(done + 1, total)} sur ${total}...`);
@@ -384,11 +411,12 @@ export const useZoneStore = create<ZoneState>((set, get) => ({
         loadAmp(),
         getJson<Report[]>(REPORTS_URL),
         loadNoiseIndex(),
+        loadEconomic(reloadSnapshots),
       ]);
       if (!collection) throw new Error("Les zones (data/amp/zones.geojson) sont introuvables : lance « npm run data:zones ».");
       const osmCollection = osm.unchanged ? inputs?.osm : osm.geojson;
       if (!osmCollection) throw new Error("Les donnees OpenStreetMap sont introuvables : lance « npm run data:osm ».");
-      inputs = { collection, osm: osmCollection, base: reports, amp, noiseIndex };
+      inputs = { collection, osm: osmCollection, base: reports, amp, noiseIndex, economic };
       cachedZoneIndex = null;
       cachedBuiltZones = null;
       cachedSlopedZones = null;
