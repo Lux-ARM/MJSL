@@ -23,6 +23,7 @@ import {
   type LngLat,
 } from "../../domain/zone/index.js";
 import { loadPreset } from "../overpass/client.js";
+import { mergeTiles } from "../overpass/mergeTiles.js";
 import { fetchSnapshotManifest, type SnapshotManifest } from "../overpass/snapshot.js";
 import { OSM_TILES, SOCIAL_TILES } from "../overpass/zonePreset.js";
 import { useAppStore, type LoadState } from "../state.js";
@@ -142,7 +143,7 @@ interface CityData {
  * when the manifest version has not changed. It never sends the 60 tile queries to Overpass:
  * that path is reserved for `forceRefresh` on the small overlay presets.
  */
-async function loadCity(
+export async function loadCity(
   reloadSnapshots: boolean,
   onProgress: (done: number, total: number) => void,
 ): Promise<CityData> {
@@ -158,20 +159,11 @@ async function loadCity(
     }
   }
 
-  const seen = new Set<string>();
-  const features: FeatureCollection["features"] = [];
+  // Keep responses in reference order while requests still run concurrently.
+  // Retries replace the same slot; optional social tiles have lower priority.
+  const tiles: (FeatureCollection | undefined)[] = new Array(OSM_TILES.length + SOCIAL_TILES.length);
   let fromCache = true;
   let lastError: unknown = null;
-  const take = (geojson: FeatureCollection) => {
-    for (const f of geojson.features) {
-      const key = String(f.id ?? f.properties?.osm_id ?? "");
-      if (key) {
-        if (seen.has(key)) continue; // an object crossing a tile border comes back in both tiles
-        seen.add(key);
-      }
-      features.push(f);
-    }
-  };
 
   const CONCURRENCY = 8;
   let completed = 0;
@@ -186,7 +178,7 @@ async function loadCity(
       try {
         const result = await loadPreset(OSM_TILES[i]!, { reloadSnapshot: reloadSnapshots });
         if (!result.fromCache) fromCache = false;
-        take(result.geojson);
+        tiles[i] = result.geojson;
       } catch (error) {
         retryQueue.push(i);
         lastError = error;
@@ -210,7 +202,7 @@ async function loadCity(
           fromCache = false;
           await new Promise((r) => setTimeout(r, 1500));
         }
-        take(result.geojson);
+        tiles[i] = result.geojson;
       } catch (error) {
         next.push(i);
         lastError = error;
@@ -222,9 +214,9 @@ async function loadCity(
 
   // Optional extras (cameras, crossings, shelters...): fetched concurrently via Promise.allSettled
   await Promise.allSettled(
-    SOCIAL_TILES.map(async (tile) => {
+    SOCIAL_TILES.map(async (tile, i) => {
       try {
-        take((await loadPreset(tile, { reloadSnapshot: reloadSnapshots })).geojson);
+        tiles[OSM_TILES.length + i] = (await loadPreset(tile, { reloadSnapshot: reloadSnapshots })).geojson;
       } catch {
         /* the indicators built on these stay "no data" */
       }
@@ -237,7 +229,7 @@ async function loadCity(
   // next reload has to try the missing tiles again. The initial load leaves the
   // version null, so the first reload always verifies the files once.
   osmManifestVersion = reloadSnapshots && failed === 0 ? manifest?.version ?? null : null;
-  return { geojson: { type: "FeatureCollection", features }, fromCache, failed, unchanged: false };
+  return { geojson: mergeTiles(tiles), fromCache, failed, unchanged: false };
 }
 
 async function getJson<T>(url: string): Promise<T | undefined> {
